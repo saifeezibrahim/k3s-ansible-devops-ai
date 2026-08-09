@@ -1,0 +1,118 @@
+---
+name: Test
+on:
+  workflow_call:
+jobs:
+  molecule:
+    name: Molecule
+    runs-on: [self-hosted, linux, x64, k3s-ci, virtualbox, nested-virt]
+    strategy:
+      matrix:
+        scenario:
+          - default
+          - single_node
+          - calico
+          - cilium
+          - kube-vip
+          # - ipv6
+      fail-fast: true
+      max-parallel: 1
+    env:
+      PYTHON_VERSION: "3.11"
+      VAGRANT_DEFAULT_PROVIDER: virtualbox
+      VAGRANT_HOME: ${{ github.workspace }}/.vagrant-home
+
+    steps:
+      - name: Check out the codebase
+        uses: actions/checkout@REDACTED # 7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Clean repository-owned resources before testing
+        run: ./.github/scripts/cleanup-runner-resources.sh --apply
+
+      - name: Record host-only network baseline
+        run: ./.github/scripts/cleanup-runner-resources.sh --snapshot
+
+      - name: Check nested VirtualBox platform
+        run: |
+          set -Eeuo pipefail
+          grep -Eq 'vmx|svm' /proc/cpuinfo
+          test -c /dev/kvm
+          test -c /dev/vboxdrv
+          VBoxManage --version
+          vagrant --version
+          test -r /etc/vbox/networks.conf
+          test "$(stat -c '%u' /etc/vbox/networks.conf)" -eq 0
+          free -h
+          df -Pk "${RUNNER_TEMP}"
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@REDACTED # 7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip' # caching pip dependencies
+
+      - name: Restore vagrant Boxes cache
+        uses: actions/cache/restore@REDACTED # 6.1.0
+        with:
+          path: .vagrant-home/boxes
+          key: vagrant-boxes-${{ runner.name }}-${{ runner.os }}-${{ runner.arch }}-virtualbox-7.2-vagrant-2.4-${{ hashFiles('.github/vagrant-boxes.lock') }} # yamllint disable-line rule:line-length
+          fail-on-cache-miss: true
+
+      - name: Prepare runner-owned Vagrant box masters
+        run: ./.github/scripts/prepare-vagrant-box-masters.sh
+
+      - name: Install dependencies
+        run: |
+          echo "::group::Upgrade pip"
+          python3 -m pip install --upgrade pip
+          echo "::endgroup::"
+
+          echo "::group::Install Python requirements from requirements.txt"
+          python3 -m pip install -r requirements.txt
+          echo "::endgroup::"
+
+      - name: Test with molecule
+        run: |
+          set -Eeuo pipefail
+          resource_dir="${RUNNER_TEMP}/logs/resources/${{ matrix.scenario }}"
+          timing_file="${RUNNER_TEMP}/logs/timing/${{ matrix.scenario }}.txt"
+          mkdir -p -- "${timing_file%/*}"
+          ./.github/scripts/monitor-runner-resources.sh "$resource_dir" 10 &
+          monitor_pid=$!
+          stop_monitor() {
+            kill -TERM "$monitor_pid" 2>/dev/null || true
+            wait "$monitor_pid" 2>/dev/null || true
+          }
+          trap stop_monitor EXIT
+          /usr/bin/time -v -o "$timing_file" \
+            molecule test --scenario-name ${{ matrix.scenario }}
+        timeout-minutes: 180
+        env:
+          ANSIBLE_K3S_LOG_DIR: ${{ runner.temp }}/logs/k3s-ansible/${{ matrix.scenario }}
+          ANSIBLE_SSH_RETRIES: 4
+          ANSIBLE_TIMEOUT: 120
+          PY_COLORS: 1
+          ANSIBLE_FORCE_COLOR: 1
+          K3S_CI_CREATE_TIMING_LOG: ${{ runner.temp }}/logs/timing/${{ matrix.scenario }}-create.log
+
+      - name: Collect runner diagnostics
+        if: always()
+        run: ./.github/scripts/collect-runner-diagnostics.sh "${RUNNER_TEMP}/logs/runner"
+        env:
+          K3S_CI_SCENARIO_NAME: ${{ matrix.scenario }}
+
+      - name: Clean repository-owned resources after testing
+        if: always()
+        run: ./.github/scripts/cleanup-runner-resources.sh --apply
+
+      - name: Upload log files
+        if: always() # do this even if a step before has failed
+        uses: actions/upload-artifact@REDACTED # 7.0.1
+        with:
+          name: logs-${{ matrix.scenario }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/logs
+          if-no-files-found: warn
+          retention-days: 14

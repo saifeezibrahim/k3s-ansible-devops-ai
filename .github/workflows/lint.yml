@@ -1,0 +1,75 @@
+---
+name: Linting
+on:
+  workflow_call:
+jobs:
+  pre-commit-ci:
+    name: Pre-Commit
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_VERSION: "3.12"
+
+    steps:
+      - name: Check out the codebase
+        uses: actions/checkout@REDACTED # 7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@REDACTED # 7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip' # caching pip dependencies
+
+      - name: Restore Ansible cache
+        id: cache-ansible
+        uses: actions/cache/restore@REDACTED # 6.1.0
+        with:
+          path: ~/.ansible/collections
+          key: ansible-${{ hashFiles('collections/requirements.yml') }}
+
+      - name: Install dependencies
+        run: |
+          echo "::group::Upgrade pip"
+          python3 -m pip install --upgrade pip
+          echo "::endgroup::"
+
+          echo "::group::Install Python requirements from requirements.txt"
+          python3 -m pip install -r requirements.txt
+          echo "::endgroup::"
+
+      - name: Install Ansible collections with retries
+        if: steps.cache-ansible.outputs.cache-hit != 'true'
+        run: |
+          set -Eeuo pipefail
+          for attempt in 1 2 3 4 5; do
+            if ansible-galaxy collection install -r collections/requirements.yml; then
+              exit 0
+            fi
+            echo "Ansible Galaxy attempt ${attempt} failed; retrying."
+            sleep $((attempt * 10))
+          done
+          exit 1
+
+      - name: Save Ansible collection cache
+        if: steps.cache-ansible.outputs.cache-hit != 'true'
+        uses: actions/cache/save@REDACTED # 6.1.0
+        with:
+          path: ~/.ansible/collections
+          key: ansible-${{ hashFiles('collections/requirements.yml') }}
+
+      - name: Run pre-commit
+        uses: pre-commit/action@REDACTED # 3.0.1
+
+  ensure-pinned-actions:
+    name: Ensure SHA Pinned Actions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@REDACTED # 7.0.1
+      - name: Ensure SHA pinned actions
+        uses: zgosalvez/REDACTED@REDACTED # 5.0.6
+        with:
+          allowlist: |
+            aws-actions/
+            docker/login-action
